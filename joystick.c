@@ -16,7 +16,7 @@
 // Definição dos pinos do joystick
 #define JOYSTICK_X_PIN 26  // ADC0 (GPIO26)
 #define JOYSTICK_Y_PIN 27  // ADC1 (GPIO27)
-#define JOYSTICK_BUTTON_PIN 14  // GPIO14 para o botão do joystick
+#define JOYSTICK_BUTTON_PIN 22  // GPIO14 para o botão do joystick
 
 // Limiares para determinação das direções
 #define DEADZONE 0.2f
@@ -27,7 +27,11 @@ typedef struct {
     float y;
     bool button_pressed;
     const char* direction;
+    bool changed;  // Flag para indicar se houve mudança
 } JoystickData;
+
+// Variável para armazenar o último estado do joystick
+static JoystickData last_joystick_state = {0};
 
 // Função para inicializar o ADC para o joystick
 void joystick_init() {
@@ -37,6 +41,17 @@ void joystick_init() {
     gpio_init(JOYSTICK_BUTTON_PIN);
     gpio_set_dir(JOYSTICK_BUTTON_PIN, GPIO_IN);
     gpio_pull_up(JOYSTICK_BUTTON_PIN);
+}
+
+// Função para verificar se houve mudança no estado do joystick
+bool joystick_changed(const JoystickData* new_state) {
+    if (fabs(new_state->x - last_joystick_state.x) > 0.1f ||
+        fabs(new_state->y - last_joystick_state.y) > 0.1f ||
+        new_state->button_pressed != last_joystick_state.button_pressed ||
+        strcmp(new_state->direction, last_joystick_state.direction) != 0) {
+        return true;
+    }
+    return false;
 }
 
 // Função para ler os valores do joystick
@@ -91,8 +106,16 @@ JoystickData read_joystick() {
         } else if (angle < 13*M_PI/8) {
             data.direction = "Leste";
         } else {
-            data.direction = "Nodeste";
+            data.direction = "Nordeste";
         }
+    }
+    
+    // Verificar se houve mudança
+    data.changed = joystick_changed(&data);
+    
+    // Atualizar o último estado
+    if (data.changed) {
+        last_joystick_state = data;
     }
     
     return data;
@@ -102,6 +125,16 @@ JoystickData read_joystick() {
 void send_html_response(struct tcp_pcb *tpcb) {
     JoystickData joystick = read_joystick();
     
+    // Log de acesso
+    printf("Dispositivo conectado - Enviando página web...\n");
+    if (joystick.changed) {
+        printf("Alteração no joystick detectada:\n");
+        printf("  Direção: %s\n", joystick.direction);
+        printf("  Posição X: %.2f\n", joystick.x);
+        printf("  Posição Y: %.2f\n", joystick.y);
+        printf("  Botão: %s\n", joystick.button_pressed ? "Pressionado" : "Liberado");
+    }
+    
     char html[2048];
     snprintf(html, sizeof(html),
         "HTTP/1.1 200 OK\r\n"
@@ -110,14 +143,15 @@ void send_html_response(struct tcp_pcb *tpcb) {
         "<!DOCTYPE html>\n"
         "<html>\n"
         "<head>\n"
-        "<title>Monitor do Joystick</title>\n"
+        "<title>Representacao da Posicao de um Farol Maritimo</title>\n"
         "<meta http-equiv=\"refresh\" content=\"0.5\">\n"
         "</head>\n"
         "<body>\n"
-        "<h1>Monitor do Joystick</h1>\n"
-        "<p>Direção: %s</p>\n"
-        "<p>Posição X: %.2f</p>\n"
-        "<p>Posição Y: %.2f</p>\n"
+        "<h1>Representacao da Posicao de um Farol Maritimo</h1>\n"
+        "<p>Direcao: %s</p>\n"
+        "<p>Posicao X: %.2f</p>\n"
+        "<p>Posicao Y: %.2f</p>\n"
+        "<p>Botao: %s</p>\n"
         "</body>\n"
         "</html>\n",
         joystick.direction,
@@ -138,6 +172,9 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, er
         return ERR_OK;
     }
 
+    // Log da requisição recebida
+    printf("Requisição HTTP recebida\n");
+    
     pbuf_free(p);
     
     // Envia a resposta HTML
@@ -147,6 +184,8 @@ static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, er
 
 // Função de callback ao aceitar conexões TCP
 static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
+    // Log de nova conexão
+    printf("Nova conexão TCP estabelecida\n");
     tcp_recv(newpcb, tcp_server_recv);
     return ERR_OK;
 }
@@ -198,6 +237,21 @@ int main() {
     // Loop principal
     while (true) {
         cyw43_arch_poll();
+        
+        // Verificar periodicamente o estado do joystick
+        static absolute_time_t last_check = 0;
+        if (absolute_time_diff_us(last_check, get_absolute_time()) > 100000) { // 100ms
+            JoystickData current = read_joystick();
+            if (current.changed) {
+                printf("Joystick alterado (não solicitado):\n");
+                printf("  Direcao: %s\n", current.direction);
+                printf("  Posicao X: %.2f\n", current.x);
+                printf("  Posicao Y: %.2f\n", current.y);
+                printf("  Botao: %s\n", current.button_pressed ? "Pressionado" : "Liberado");
+            }
+            last_check = get_absolute_time();
+        }
+        
         sleep_ms(10);
     }
 
