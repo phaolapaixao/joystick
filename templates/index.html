@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Controle do Farol</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Posição do Farol Marítimo</h1>
+        
+        <div class="joystick-data">
+            <div class="data-item">
+                <label>Direção:</label>
+                <span id="direction">Centro</span>
+            </div>
+            <div class="data-item">
+                <label>Posição X:</label>
+                <span id="x-value">0.00</span>
+            </div>
+            <div class="data-item">
+                <label>Posição Y:</label>
+                <span id="y-value">0.00</span>
+            </div>
+            <div class="data-item">
+                <label>Botão:</label>
+                <span id="button-status">Liberado</span>
+            </div>
+        </div>
+
+        <div class="visualization">
+            <div class="joystick-visual">
+                <div class="joystick-center"></div>
+                <div class="joystick-position" id="joystick-position"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function updateJoystickData() {
+            fetch('/api/joystick')
+                .then(response => response.json())
+                .then(data => {
+                    // Atualiza os valores textuais
+                    document.getElementById('direction').textContent = data.direction;
+                    document.getElementById('x-value').textContent = data.x.toFixed(2);
+                    document.getElementById('y-value').textContent = data.y.toFixed(2);
+                    document.getElementById('button-status').textContent = 
+                        data.button ? 'Pressionado' : 'Liberado';
+
+                    // Atualiza a representação visual
+                    const joystickPos = document.getElementById('joystick-position');
+                    const maxMovement = 50; // pixels
+                    joystickPos.style.transform = `translate(
+                        ${-data.y * maxMovement}px,
+                        ${data.x * maxMovement}px
+                    )`;
+                    joystickPos.style.backgroundColor = data.button ? '#f00' : '#333';
+                });
+        }
+
+        // Atualiza a cada 100ms
+        setInterval(updateJoystickData, 100);
+    </script>
+</body>
+</html>

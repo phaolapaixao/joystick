@@ -1,39 +1,46 @@
 #include "pico/stdlib.h"
-#include "hardware/adc.h"
+#include "hardware/adc.h" 
 #include "pico/cyw43_arch.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
-#include "lwip/netif.h"
+#include "lwip/dns.h"
+#include "lwip/altcp.h"
+#include "lwip/altcp_tcp.h"
 #include <math.h>
 
-// Configurações de Wi-Fi
+// Configurações
 #define WIFI_SSID "ANA"
 #define WIFI_PASSWORD "Phaola2023"
+#define SERVER_IP "192.168.18.219"
+#define SERVER_PORT 5000
+#define MAX_RETRIES 3
+#define RETRY_DELAY_MS 2000
+#define SEND_INTERVAL_MS 100
+#define CONNECTION_TIMEOUT_MS 5000
 
-// Definição dos pinos do joystick
-#define JOYSTICK_X_PIN 26  // ADC0 (GPIO26)
-#define JOYSTICK_Y_PIN 27  // ADC1 (GPIO27)
-#define JOYSTICK_BUTTON_PIN 22  // GPIO14 para o botão do joystick
+// Pinos
+#define JOYSTICK_X_PIN 26
+#define JOYSTICK_Y_PIN 27
+#define JOYSTICK_BUTTON_PIN 22
 
-// Limiares para determinação das direções
+// Limiares
 #define DEADZONE 0.2f
+#define CHANGE_THRESHOLD 0.1f
 
-// Estrutura para armazenar os dados do joystick
 typedef struct {
     float x;
     float y;
     bool button_pressed;
     const char* direction;
-    bool changed;  // Flag para indicar se houve mudança
+    bool changed;
 } JoystickData;
 
-// Variável para armazenar o último estado do joystick
-static JoystickData last_joystick_state = {0};
+static JoystickData last_sent_state = {0};
+static int connection_retries = 0;
 
-// Função para inicializar o ADC para o joystick
 void joystick_init() {
     adc_init();
     adc_gpio_init(JOYSTICK_X_PIN);
@@ -43,39 +50,36 @@ void joystick_init() {
     gpio_pull_up(JOYSTICK_BUTTON_PIN);
 }
 
-// Função para verificar se houve mudança no estado do joystick
 bool joystick_changed(const JoystickData* new_state) {
-    if (fabs(new_state->x - last_joystick_state.x) > 0.1f ||
-        fabs(new_state->y - last_joystick_state.y) > 0.1f ||
-        new_state->button_pressed != last_joystick_state.button_pressed ||
-        strcmp(new_state->direction, last_joystick_state.direction) != 0) {
+    if (fabs(new_state->x - last_sent_state.x) > CHANGE_THRESHOLD ||
+        fabs(new_state->y - last_sent_state.y) > CHANGE_THRESHOLD ||
+        new_state->button_pressed != last_sent_state.button_pressed ||
+        strcmp(new_state->direction, last_sent_state.direction) != 0) {
         return true;
     }
     return false;
 }
 
-// Função para ler os valores do joystick
 JoystickData read_joystick() {
     JoystickData data;
     
-    // Ler valores X e Y (0-4095)
+    // Ler valores analógicos
     adc_select_input(0);
     uint16_t x_raw = adc_read();
     adc_select_input(1);
     uint16_t y_raw = adc_read();
     
-    // Converter para faixa -1.0 a 1.0 (centro em 0)
+    // Normalizar valores (-1.0 a 1.0)
     data.x = (x_raw / 2048.0f) - 1.0f;
     data.y = (y_raw / 2048.0f) - 1.0f;
-    
-    // Inverter eixo Y se necessário
-    data.y = -data.y;
+    data.y = -data.y;  // Inverter eixo Y se necessário
     
     // Aplicar deadzone
     float magnitude = sqrtf(data.x * data.x + data.y * data.y);
     if (magnitude < DEADZONE) {
         data.x = 0.0f;
         data.y = 0.0f;
+        magnitude = 0.0f;
     }
     
     // Ler botão
@@ -85,171 +89,158 @@ JoystickData read_joystick() {
     if (magnitude < DEADZONE) {
         data.direction = "Centro";
     } else {
-        float angle = atan2f(data.y, data.x);
+        float angle = atan2f(data.y, data.x) * (180.0f / M_PI);
+        if (angle < 0) angle += 360.0f;
         
-        // Ajustar ângulo para estar entre 0 e 2π
-        if (angle < 0) angle += 2 * M_PI;
-        
-        // Determinar a direção baseada no ângulo
-        if (angle < M_PI/8 || angle >= 15*M_PI/8) {
-            data.direction = "Norte";
-        } else if (angle < 3*M_PI/8) {
-            data.direction = "Noroeste";
-        } else if (angle < 5*M_PI/8) {
-            data.direction = "Oeste";
-        } else if (angle < 7*M_PI/8) {
-            data.direction = "Sudoeste";
-        } else if (angle < 9*M_PI/8) {
-            data.direction = "Sul";
-        } else if (angle < 11*M_PI/8) {
-            data.direction = "Sudeste";
-        } else if (angle < 13*M_PI/8) {
+        if (angle >= 337.5f || angle < 22.5f) {
             data.direction = "Leste";
-        } else {
+        } else if (angle < 67.5f) {
             data.direction = "Nordeste";
+        } else if (angle < 112.5f) {
+            data.direction = "Norte";
+        } else if (angle < 157.5f) {
+            data.direction = "Noroeste";
+        } else if (angle < 202.5f) {
+            data.direction = "Oeste";
+        } else if (angle < 247.5f) {
+            data.direction = "Sudoeste";
+        } else if (angle < 292.5f) {
+            data.direction = "Sul";
+        } else {
+            data.direction = "Sudeste";
         }
     }
     
-    // Verificar se houve mudança
     data.changed = joystick_changed(&data);
-    
-    // Atualizar o último estado
-    if (data.changed) {
-        last_joystick_state = data;
-    }
     
     return data;
 }
 
-// Função para enviar a resposta HTML
-void send_html_response(struct tcp_pcb *tpcb) {
-    JoystickData joystick = read_joystick();
-    
-    // Log de acesso
-    printf("Dispositivo conectado - Enviando página web...\n");
-    if (joystick.changed) {
-        printf("Alteração no joystick detectada:\n");
-        printf("  Direção: %s\n", joystick.direction);
-        printf("  Posição X: %.2f\n", joystick.x);
-        printf("  Posição Y: %.2f\n", joystick.y);
-        printf("  Botão: %s\n", joystick.button_pressed ? "Pressionado" : "Liberado");
+err_t send_joystick_data(const JoystickData *data) {
+    struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
+    if (!pcb) {
+        printf("Erro: Falha ao criar PCB\n");
+        return ERR_MEM;
     }
+
+    ip_addr_t server_addr;
+    if (!ipaddr_aton(SERVER_IP, &server_addr)) {
+        printf("Erro: Endereço IP inválido\n");
+        tcp_close(pcb);
+        return ERR_ARG;
+    }
+
+    // Configurar timeout
+    tcp_nagle_disable(pcb); 
     
-    char html[2048];
-    snprintf(html, sizeof(html),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html\r\n"
+    // Conectar
+    err_t err = tcp_connect(pcb, &server_addr, SERVER_PORT, NULL);
+    if (err != ERR_OK) {
+        printf("Erro ao conectar: %d\n", err);
+        tcp_close(pcb);
+        return err;
+    }
+
+    // Criar payload JSON
+    char json_data[128];
+    snprintf(json_data, sizeof(json_data),
+        "{\"x\":%.2f,\"y\":%.2f,\"button\":%s,\"direction\":\"%s\"}",
+        data->x, data->y,
+        data->button_pressed ? "true" : "false",
+        data->direction);
+
+    // Criar requisição HTTP completa
+    char request[512];
+    int request_len = snprintf(request, sizeof(request),
+        "POST /api/joystick HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "User-Agent: PicoW/1.0\r\n"
+        "Accept: */*\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n"
+        "Connection: close\r\n"
         "\r\n"
-        "<!DOCTYPE html>\n"
-        "<html>\n"
-        "<head>\n"
-        "<title>Representacao da Posicao de um Farol Maritimo</title>\n"
-        "<meta http-equiv=\"refresh\" content=\"0.5\">\n"
-        "</head>\n"
-        "<body>\n"
-        "<h1>Representacao da Posicao de um Farol Maritimo</h1>\n"
-        "<p>Direcao: %s</p>\n"
-        "<p>Posicao X: %.2f</p>\n"
-        "<p>Posicao Y: %.2f</p>\n"
-        "<p>Botao: %s</p>\n"
-        "</body>\n"
-        "</html>\n",
-        joystick.direction,
-        joystick.x,
-        joystick.y,
-        joystick.button_pressed ? "Pressionado" : "Liberado"
-    );
+        "%s",
+        SERVER_IP, SERVER_PORT,
+        (int)strlen(json_data),
+        json_data);
 
-    tcp_write(tpcb, html, strlen(html), TCP_WRITE_FLAG_COPY);
-    tcp_output(tpcb);
-}
-
-// Função de callback para processar requisições HTTP
-static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
-    if (!p) {
-        tcp_close(tpcb);
-        tcp_recv(tpcb, NULL);
-        return ERR_OK;
+    // Enviar dados
+    err = tcp_write(pcb, request, request_len, TCP_WRITE_FLAG_COPY);
+    if (err != ERR_OK) {
+        printf("Erro ao escrever dados: %d\n", err);
+        tcp_close(pcb);
+        return err;
     }
 
-    // Log da requisição recebida
-    printf("Requisição HTTP recebida\n");
-    
-    pbuf_free(p);
-    
-    // Envia a resposta HTML
-    send_html_response(tpcb);
+    err = tcp_output(pcb);
+    if (err != ERR_OK) {
+        printf("Erro ao enviar dados: %d\n", err);
+        tcp_close(pcb);
+        return err;
+    }
+
+    // Esperar um pouco para garantir o envio
+    sleep_ms(100);
+    tcp_close(pcb);
     return ERR_OK;
 }
 
-// Função de callback ao aceitar conexões TCP
-static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
-    // Log de nova conexão
-    printf("Nova conexão TCP estabelecida\n");
-    tcp_recv(newpcb, tcp_server_recv);
-    return ERR_OK;
-}
-
-// Função principal
-int main() {
-    stdio_init_all();
-    
-    // Inicializar joystick
-    joystick_init();
-    
-    // Inicializa Wi-Fi
-    while (cyw43_arch_init()) {
-        printf("Falha ao inicializar Wi-Fi\n");
-        sleep_ms(1000);
-    }
-
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-    cyw43_arch_enable_sta_mode();
-
-    printf("Conectando ao Wi-Fi...\n");
-    while (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, 20000)) {
+bool try_wifi_connection() {
+    printf("Tentando conectar ao Wi-Fi...\n");
+    if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK, 10000)) {
         printf("Falha ao conectar ao Wi-Fi\n");
-        sleep_ms(1000);
+        return false;
     }
-
     printf("Conectado ao Wi-Fi\n");
     if (netif_default) {
-        printf("IP do dispositivo: %s\n", ipaddr_ntoa(&netif_default->ip_addr));
+        printf("IP: %s\n", ipaddr_ntoa(&netif_default->ip_addr));
     }
+    return true;
+}
 
-    // Configura o servidor TCP
-    struct tcp_pcb *server = tcp_new();
-    if (!server) {
-        printf("Falha ao criar servidor TCP\n");
+int main() {
+    stdio_init_all();
+    joystick_init();
+    
+    if (cyw43_arch_init()) {
+        printf("Falha ao inicializar Wi-Fi\n");
         return -1;
     }
 
-    if (tcp_bind(server, IP_ADDR_ANY, 80) != ERR_OK) {
-        printf("Falha ao associar servidor TCP à porta 80\n");
-        return -1;
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+    cyw43_arch_enable_sta_mode();
+
+    // Tentar conectar ao Wi-Fi
+    while (!try_wifi_connection()) {
+        sleep_ms(RETRY_DELAY_MS);
     }
 
-    server = tcp_listen(server);
-    tcp_accept(server, tcp_server_accept);
-
-    printf("Servidor ouvindo na porta 80\n");
-
-    // Loop principal
+    absolute_time_t last_send_time = get_absolute_time();
+    
     while (true) {
-        cyw43_arch_poll();
+        JoystickData current = read_joystick();
         
-        // Verificar periodicamente o estado do joystick
-        static absolute_time_t last_check = 0;
-        if (absolute_time_diff_us(last_check, get_absolute_time()) > 100000) { // 100ms
-            JoystickData current = read_joystick();
-            if (current.changed) {
-                printf("Joystick alterado (não solicitado):\n");
-                printf("  Direcao: %s\n", current.direction);
-                printf("  Posicao X: %.2f\n", current.x);
-                printf("  Posicao Y: %.2f\n", current.y);
-                printf("  Botao: %s\n", current.button_pressed ? "Pressionado" : "Liberado");
+        if (current.changed && absolute_time_diff_us(last_send_time, get_absolute_time()) >= SEND_INTERVAL_MS * 1000) {
+            printf("Enviando: x=%.2f, y=%.2f, button=%d, direction=%s\n",
+                  current.x, current.y, current.button_pressed, current.direction);
+            
+            err_t err = send_joystick_data(&current);
+            if (err == ERR_OK) {
+                last_sent_state = current;
+                connection_retries = 0;
+                cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0); // LED aceso = sucesso
+            } else {
+                printf("Erro ao enviar (tentativa %d/%d)\n", connection_retries + 1, MAX_RETRIES);
+                cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1); // LED apagado = erro
+                if (++connection_retries >= MAX_RETRIES) {
+                    printf("Reconectando ao Wi-Fi...\n");
+                    try_wifi_connection();
+                    connection_retries = 0;
+                }
             }
-            last_check = get_absolute_time();
+            
+            last_send_time = get_absolute_time();
         }
         
         sleep_ms(10);
